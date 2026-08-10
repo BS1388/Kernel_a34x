@@ -1,0 +1,100 @@
+name: Build boot.image
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+    inputs:
+      release:
+          description: '🚀 Make a release?'
+          type: boolean
+          required: true
+          default: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      # 1. Checkout repository with submodules (shallow clone)
+      - name: Checkout repository
+        uses: actions/checkout@v5
+        with:
+          submodules: true
+          fetch-depth: 1
+
+      - name: Cleanup space
+        run: |
+          sudo apt-get remove --purge -y "php*" "dotnet*" "mysql*" "nodejs*" "clang*" "google*"
+          sudo apt-get autoremove -y
+          sudo apt-get clean
+          sudo rm -rf /usr/local
+
+      # 2. Run your custom bash script
+      - name: Run build script
+        run: |
+          chmod +x ./build_kernel.sh
+          bash build_kernel.sh
+
+      - name: Copy kernel image
+        run: |
+          cp out/target/product/a34x/obj/KLEAF_OBJ/dist/kernel_device_modules-6.6/mgk_64_k66_kernel_aarch64.user/Image Image
+          sha256sum Image >> Image.sha256sum
+
+      - name: Move out directory
+        run: |
+          mv out/target/product/a34x/obj/KLEAF_OBJ/dist .
+          cd dist; tar czvf ../dist.tar.gz *
+
+      - name: Extract the .config file from a kernel image
+        run: |
+          bash kernel-6.6/scripts/extract-ikconfig Image >> kernel_config
+
+          export OSRC_RELEASE="$(cat build_kernel.sh | grep SEC_BUILDNUMBER | tail | sed 's/^export SEC_BUILDNUMBER\=\"//' | sed 's/\"$//' | sed 's/ogki//')"
+          echo "Based on $OSRC_RELEASE Samsung Open Source Kernel source" >> versions.txt
+          echo "osrc_release=$OSRC_RELEASE" >> $GITHUB_ENV
+
+          export VERSION="$(cat kernel-6.6/Makefile | grep 'VERSION = ' | head -n 1 | sed 's/VERSION = //')"
+          export PATCHLEVEL="$(cat kernel-6.6/Makefile | grep 'PATCHLEVEL = ' | head -n 1 | sed 's/PATCHLEVEL = //')"
+          export SUBLEVEL="$(cat kernel-6.6/Makefile | grep 'SUBLEVEL = ' | head -n 1 | sed 's/SUBLEVEL = //')"
+          export KERNEL_VERSION="$VERSION.$PATCHLEVEL.$SUBLEVEL"
+          echo "Linux Kernel ARM64 $KERNEL_VERSION" >> versions.txt
+          echo "kernel_release=$KERNEL_VERSION" >> $GITHUB_ENV
+
+          export ASB_LEVEL="$(cat kernel-6.6/build.config.common | grep ASB_SPL | tail | sed 's/^ASB_SPL\=//')"
+          echo "Merged $ASB_LEVEL android15-6.6 ASB Security Patch Level" >> versions.txt
+          echo "asb_level=$ASB_LEVEL" >> $GITHUB_ENV
+
+          echo "osrc_release=$OSRC_RELEASE" >> build_info.txt
+          echo "asb_level=$ASB_LEVEL" >> build_info.txt
+          echo "kernel_release=$KERNEL_VERSION" >> build_info.txt
+          echo "$(grep 'BRANCH=' kernel-6.6/build.config.common)" >> build_info.txt
+          echo "$(grep 'KMI_GENERATION=' kernel-6.6/build.config.common)" >> build_info.txt
+
+      - name: Upload dist artifact
+        uses: actions/upload-artifact@v5
+        with:
+          name: dist-dir
+          path: dist
+
+      - name: Upload Image artifact
+        uses: actions/upload-artifact@v5
+        with:
+          name: kernel-image
+          path: Image
+
+      - name: Upload release assets
+        if: github.event.inputs.release
+        uses: softprops/action-gh-release@v2.4.2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          body_path: versions.txt
+          tag_name: "${{ env.kernel_release }}_${{ env.asb_level }}_${{ env.osrc_release }}"
+          name: "${{ env.kernel_release }} - ${{ env.asb_level }} - ${{ env.osrc_release }}"
+          files: |
+            Image
+            Image.sha256sum
+            dist.tar.gz
+            kernel_config
+            build_info.txt
+
