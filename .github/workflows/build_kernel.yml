@@ -1,7 +1,6 @@
 name: Build boot.image
 
 on:
-  push:
   pull_request:
   workflow_dispatch:
     inputs:
@@ -36,9 +35,9 @@ permissions:
 env:
   G_WORKSPACE: ${{ github.workspace }}
   G_EXT: ${{ github.workspace }}/external_deps
-  G_KERNEL: ${{ github.workspace }}/Kernel-6.6
-  DEFCONFIG: Kernel-6.6/arch/arm64/configs/gki_defconfig
   KSU_VAR: ${{ github.event.inputs.ksu_variant || 'NO-ROOT' }}
+  # G_KERNEL and DEFCONFIG are set dynamically by "Detect kernel source directory" below,
+  # since different branches use different casing (Kernel-6.6 vs kernel-6.6).
 
 jobs:
   build:
@@ -51,15 +50,29 @@ jobs:
           submodules: true
           fetch-depth: 1
 
-      # Your repo has a broken symlink: kernel/kernel-6.6 -> ../kernel-6.6 (lowercase),
-      # but the real directory is top-level "Kernel-6.6" (capital K). On a case-sensitive
-      # filesystem that symlink never resolves. build_kernel.sh's own gen_build_config.py
-      # pipeline (and the build.config files it generates) rely on this exact relative
-      # path resolving from inside kernel/, so fix it here before anything else runs.
-      - name: Fix kernel-6.6 symlink case mismatch
+      # Different branches have used different casing for this top-level directory
+      # (confirmed: "Kernel-6.6" on the branch we tested first, "kernel-6.6" on
+      # "Permissive"). Detect whichever one actually exists instead of hardcoding it,
+      # and fix the kernel/kernel-6.6 symlink to point at the real one — on a
+      # case-sensitive filesystem a mismatched symlink target never resolves, and
+      # build_kernel.sh's own gen_build_config.py pipeline relies on it resolving
+      # from inside kernel/.
+      - name: Detect kernel source directory
         run: |
+          if [ -f "Kernel-6.6/Makefile" ]; then
+            REAL_DIR="Kernel-6.6"
+          elif [ -f "kernel-6.6/Makefile" ]; then
+            REAL_DIR="kernel-6.6"
+          else
+            echo "::error::Could not find a Kernel-6.6 or kernel-6.6 directory with a Makefile at the repo root on this branch (submodule may not have initialized)."
+            exit 1
+          fi
+          echo "Detected kernel source dir: $REAL_DIR"
+          echo "G_KERNEL=${{ github.workspace }}/$REAL_DIR" >> $GITHUB_ENV
+          echo "DEFCONFIG=$REAL_DIR/arch/arm64/configs/gki_defconfig" >> $GITHUB_ENV
+
           rm -f kernel/kernel-6.6
-          ln -sfn ../Kernel-6.6 kernel/kernel-6.6
+          ln -sfn "../$REAL_DIR" kernel/kernel-6.6
           ls -la kernel/kernel-6.6
 
       - name: Cleanup & Setup External Deps
@@ -318,27 +331,25 @@ jobs:
           mv out/target/product/a34x/obj/KLEAF_OBJ/dist .
           cd dist; tar czvf ../dist.tar.gz *
 
-      # Note: your repo's top-level "Kernel-6.6" is the real kernel source root.
-      # (kernel/kernel-6.6 is a symlink pointing at "../kernel-6.6" — lowercase —
-      # which doesn't match the actual "Kernel-6.6" folder on a case-sensitive
-      # filesystem, so it's broken on the Linux CI runner.)
+      # Uses env.G_KERNEL (set dynamically in "Detect kernel source directory")
+      # instead of a hardcoded name, since branches differ in casing.
       - name: Extract the .config file from a kernel image
         run: |
-          bash Kernel-6.6/scripts/extract-ikconfig Image >> kernel_config
+          bash "${{ env.G_KERNEL }}/scripts/extract-ikconfig" Image >> kernel_config
 
           export OSRC_RELEASE="$(cat build_kernel.sh | grep SEC_BUILDNUMBER | tail | sed 's/^export SEC_BUILDNUMBER\=\"//' | sed 's/\"$//' | sed 's/ogki//')"
           echo "Based on $OSRC_RELEASE Samsung Open Source Kernel source" >> versions.txt
           echo "KernelSU variant: ${{ env.KSU_VAR }}" >> versions.txt
           echo "osrc_release=$OSRC_RELEASE" >> $GITHUB_ENV
 
-          export VERSION="$(cat Kernel-6.6/Makefile | grep 'VERSION = ' | head -n 1 | sed 's/VERSION = //')"
-          export PATCHLEVEL="$(cat Kernel-6.6/Makefile | grep 'PATCHLEVEL = ' | head -n 1 | sed 's/PATCHLEVEL = //')"
-          export SUBLEVEL="$(cat Kernel-6.6/Makefile | grep 'SUBLEVEL = ' | head -n 1 | sed 's/SUBLEVEL = //')"
+          export VERSION="$(cat "${{ env.G_KERNEL }}/Makefile" | grep 'VERSION = ' | head -n 1 | sed 's/VERSION = //')"
+          export PATCHLEVEL="$(cat "${{ env.G_KERNEL }}/Makefile" | grep 'PATCHLEVEL = ' | head -n 1 | sed 's/PATCHLEVEL = //')"
+          export SUBLEVEL="$(cat "${{ env.G_KERNEL }}/Makefile" | grep 'SUBLEVEL = ' | head -n 1 | sed 's/SUBLEVEL = //')"
           export KERNEL_VERSION="$VERSION.$PATCHLEVEL.$SUBLEVEL"
           echo "Linux Kernel ARM64 $KERNEL_VERSION" >> versions.txt
           echo "kernel_release=$KERNEL_VERSION" >> $GITHUB_ENV
 
-          export ASB_LEVEL="$(cat Kernel-6.6/build.config.common | grep ASB_SPL | tail | sed 's/^ASB_SPL\=//')"
+          export ASB_LEVEL="$(cat "${{ env.G_KERNEL }}/build.config.common" | grep ASB_SPL | tail | sed 's/^ASB_SPL\=//')"
           echo "Merged $ASB_LEVEL android15-6.6 ASB Security Patch Level" >> versions.txt
           echo "asb_level=$ASB_LEVEL" >> $GITHUB_ENV
 
@@ -346,8 +357,8 @@ jobs:
           echo "asb_level=$ASB_LEVEL" >> build_info.txt
           echo "kernel_release=$KERNEL_VERSION" >> build_info.txt
           echo "ksu_variant=${{ env.KSU_VAR }}" >> build_info.txt
-          echo "$(grep 'BRANCH=' Kernel-6.6/build.config.common)" >> build_info.txt
-          echo "$(grep 'KMI_GENERATION=' Kernel-6.6/build.config.common)" >> build_info.txt
+          echo "$(grep 'BRANCH=' "${{ env.G_KERNEL }}/build.config.common")" >> build_info.txt
+          echo "$(grep 'KMI_GENERATION=' "${{ env.G_KERNEL }}/build.config.common")" >> build_info.txt
 
       - name: Compute release filename
         run: |
