@@ -1,6 +1,7 @@
-name: Build boot.image
+name: Build Kernel (KernelSU)
 
 on:
+  push:
   pull_request:
   workflow_dispatch:
     inputs:
@@ -21,7 +22,7 @@ on:
         options:
           - NO-ROOT
           - KSUN
-          - KSUN-SUSFS-DEV
+          - WILD-KERNEL-SUSFS
           - KSUN-SUSFS-v1.5.12
           - KSU-TIAN
           - KSU-TIAN-SUSFS
@@ -96,7 +97,7 @@ jobs:
         run: |
           cd ${{ env.G_EXT }}/susfs4ksu
           case "${{ env.KSU_VAR }}" in
-            "KSUN-SUSFS-DEV")
+            "WILD-KERNEL-SUSFS")
               cp ./kernel_patches/include/linux/* ${{ env.G_KERNEL }}/include/linux/
               cp ./kernel_patches/fs/* ${{ env.G_KERNEL }}/fs/
               ;;
@@ -123,7 +124,7 @@ jobs:
               patch -p1 < ${{ env.G_EXT }}/susfs4ksu/kernel_patches/50_add_susfs_in_gki-android15-6.6.patch || true
               patch -p1 < ${{ env.G_EXT }}/kernel_patches/wild/susfs_fix_patches/v1.5.12/1_fix_base.c.patch || true
               ;;
-            "KSUN-SUSFS-DEV")
+            "WILD-KERNEL-SUSFS")
               patch -p1 < ${{ env.G_EXT }}/susfs4ksu/kernel_patches/50_add_susfs_in_gki-android15-6.6.patch || true
               ;;
             "KSU-TIAN-SUSFS"|"SUKISU-SUSFS")
@@ -140,8 +141,8 @@ jobs:
               curl -LSs "https://raw.githubusercontent.com/KernelSU-Next/KernelSU-Next/refs/heads/dev/kernel/setup.sh" | bash -
               KSU_DIR="KernelSU-Next"
               ;;
-            "KSUN-SUSFS-DEV")
-              curl -LSs "https://raw.githubusercontent.com/pershoot/KernelSU-Next/refs/heads/dev-susfs/kernel/setup.sh" | bash -s dev-susfs
+            "WILD-KERNEL-SUSFS")
+              curl -LSs "https://raw.githubusercontent.com/pershoot/KernelSU-Next/refs/heads/next-susfs/kernel/setup.sh" | bash -s next-susfs
               KSU_DIR="KernelSU-Next"
               ;;
             "KSUN-SUSFS-v1.5.12")
@@ -179,10 +180,34 @@ jobs:
             echo "KSU_VERSION=$((30000 + KSU_GIT_VERSION))" >> $GITHUB_ENV
           fi
 
+      # GKI restricts which kernel symbols vendor/device modules are allowed to
+      # link against via a "protected exports" allowlist. New susfs-added symbols
+      # (like the security_context_to_sid_with_policy family) aren't in that list,
+      # which is the likely cause of the "undefined symbol" link failures — this
+      # is a required step in WildKernels' own documented process for this exact
+      # reason. Best-effort: this searches for the allowlist file/reference instead
+      # of assuming one exact path, since your repo's exact layout isn't confirmed.
+      - name: Remove GKI protected exports restriction (SUSFS ABI fix)
+        run: |
+          case "${{ env.KSU_VAR }}" in
+            "WILD-KERNEL-SUSFS"|"KSUN-SUSFS-v1.5.12"|"KSU-TIAN-SUSFS"|"SUKISU-SUSFS")
+              echo "--- searching for protected_exports_list references (kernel tree only) ---"
+              grep -rl "protected_exports_list" --include="BUILD.bazel" --exclude-dir=external_deps --exclude-dir=.git . 2>/dev/null || echo "(no BUILD.bazel references protected_exports_list)"
+              echo "--- searching for abi_gki_protected_exports files (kernel tree only) ---"
+              find . -iname "abi_gki_protected_exports*" -not -path "./external_deps/*" -not -path "./.git/*" 2>/dev/null || echo "(none found)"
+
+              grep -rl "protected_exports_list" --include="BUILD.bazel" --exclude-dir=external_deps --exclude-dir=.git . 2>/dev/null | while read -r f; do
+                sed -i '/"protected_exports_list"\s*:\s*"android\/abi_gki_protected_exports_aarch64",\?/d' "$f"
+                echo "Removed protected_exports_list line from $f"
+              done
+              find . -iname "abi_gki_protected_exports*" -not -path "./external_deps/*" -not -path "./.git/*" -delete 2>/dev/null || true
+              ;;
+          esac
+
       - name: Configure KernelSU (Defconfig)
         run: |
           case "${{ env.KSU_VAR }}" in
-            "KSUN"|"KSUN-SUSFS-DEV")
+            "KSUN"|"WILD-KERNEL-SUSFS")
               echo "CONFIG_KSU=y" >> "${{ env.DEFCONFIG }}"
               echo "CONFIG_KPROBES=y" >> "${{ env.DEFCONFIG }}"
               echo "CONFIG_KPROBE_EVENTS=y" >> "${{ env.DEFCONFIG }}"
@@ -261,7 +286,7 @@ jobs:
               echo "CONFIG_KSU_SUSFS_HIDE_KSU_SUSFS_SYMBOLS=y" >> "${{ env.DEFCONFIG }}"
               echo "CONFIG_KSU_SUSFS_SUS_SU=n" >> "${{ env.DEFCONFIG }}"
               ;;
-            "KSUN-SUSFS-DEV")
+            "WILD-KERNEL-SUSFS")
               echo "CONFIG_KSU_SUSFS=y" >> "${{ env.DEFCONFIG }}"
               echo "CONFIG_KSU_SUSFS_SPOOF_UNAME=n" >> "${{ env.DEFCONFIG }}"
               ;;
@@ -299,7 +324,7 @@ jobs:
             echo "Applying version patch to $KBUILD_FILE for variant: ${{ env.KSU_VAR }}"
 
             case "${{ env.KSU_VAR }}" in
-              "KSUN" | "KSUN-SUSFS-DEV")
+              "KSUN" | "WILD-KERNEL-SUSFS")
                 sed -i "s/KSU_VERSION_FALLBACK := [0-9]\+/KSU_VERSION_FALLBACK := ${{ env.KSU_VERSION }}/" "$KBUILD_FILE"
                 sed -i "s/KSU_VERSION_TAG_FALLBACK := .*/KSU_VERSION_TAG_FALLBACK := ${{ env.KSU_GIT_TAG }}/" "$KBUILD_FILE"
                 echo "KSU-Next version patched: ${{ env.KSU_VERSION }} (${{ env.KSU_GIT_TAG }})"
