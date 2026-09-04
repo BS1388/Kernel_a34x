@@ -137,55 +137,7 @@ static ssize_t sel_write_enforce(struct file *file, const char __user *buf,
 				 size_t count, loff_t *ppos)
 
 {
-	char *page = NULL;
-	ssize_t length;
-	int scan_value;
-	bool old_value, new_value;
-
-	if (count >= PAGE_SIZE)
-		return -ENOMEM;
-
-	/* No partial writes. */
-	if (*ppos != 0)
-		return -EINVAL;
-
-	page = memdup_user_nul(buf, count);
-	if (IS_ERR(page))
-		return PTR_ERR(page);
-
-	length = -EINVAL;
-	if (sscanf(page, "%d", &scan_value) != 1)
-		goto out;
-
-	new_value = !!scan_value;
-
-	old_value = enforcing_enabled();
-	if (new_value != old_value) {
-		length = avc_has_perm(current_sid(), SECINITSID_SECURITY,
-				      SECCLASS_SECURITY, SECURITY__SETENFORCE,
-				      NULL);
-		if (length)
-			goto out;
-		audit_log(audit_context(), GFP_KERNEL, AUDIT_MAC_STATUS,
-			"enforcing=%d old_enforcing=%d auid=%u ses=%u"
-			" enabled=1 old-enabled=1 lsm=selinux res=1",
-			new_value, old_value,
-			from_kuid(&init_user_ns, audit_get_loginuid(current)),
-			audit_get_sessionid(current));
-		enforcing_set(new_value);
-		if (new_value)
-			avc_ss_reset(0);
-		selnl_notify_setenforce(new_value);
-		selinux_status_update_setenforce(new_value);
-		if (!new_value)
-			call_blocking_lsm_notifier(LSM_POLICY_CHANGE, NULL);
-
-		selinux_ima_measure_state();
-	}
-	length = count;
-out:
-	kfree(page);
-	return length;
+	return count;
 }
 #else
 #define sel_write_enforce NULL
